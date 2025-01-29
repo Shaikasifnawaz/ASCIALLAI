@@ -1,7 +1,5 @@
 import os
 import google.generativeai as genai
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -10,62 +8,10 @@ import re
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from heapq import nlargest
-import requests  # To fetch the Google credentials from a URL
 
 load_dotenv()
 
-
-def authenticate_google_drive():
-    # Load credentials from the URL specified in the environment file
-    credentials_url = os.getenv('GOOGLE_CREDENTIALS_URL')  # URL to the credentials JSON
-    response = requests.get(credentials_url)
-    
-    if response.status_code == 200:
-        credentials_data = response.json()  # Parse the JSON response
-        credentials = service_account.Credentials.from_service_account_info(
-            credentials_data, scopes=["https://www.googleapis.com/auth/drive.readonly"]
-        )
-        drive_service = build('drive', 'v3', credentials=credentials)
-        return drive_service
-    else:
-        raise Exception(f"Failed to load credentials from URL: {credentials_url}")
-
-
-def get_all_files(service):
-    results = service.files().list(q="mimeType='application/pdf' or mimeType='text/plain'", spaces='drive').execute()
-    items = results.get('files', [])
-    return items
-
-
-def extract_text_from_pdf(file_id, service):
-    request = service.files().get_media(fileId=file_id)
-    file = request.execute()
-
-    with open('temp.pdf', 'wb') as f:
-        f.write(file)
-
-    with open('temp.pdf', 'rb') as f:
-        pdf_reader = PyPDF2.PdfReader(f)
-        text = ""
-        for page_num in range(len(pdf_reader.pages)):
-            page = pdf_reader.pages[page_num]
-            text += page.extract_text() or ""
-    return text
-
-
-def extract_text_from_text_file(file_id, service):
-    request = service.files().get_media(fileId=file_id)
-    file = request.execute()
-
-    with open('temp.txt', 'wb') as f:
-        f.write(file)
-
-    with open('temp.txt', 'r') as f:
-        text = f.read()
-    return text
-
-
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
 generation_config = {
     "temperature": 1,
@@ -92,38 +38,55 @@ pdf_texts = {}
 file_details = []
 user_query_history = {}
 
-# Load all files from Google Drive
+# Directory containing your files
+FILES_DIRECTORY = 'files'  # Change this to your local directory path
+
+# Load all files from the local directory
 def load_all_files():
     global pdf_texts, file_details
-    drive_service = authenticate_google_drive()
-    all_files = get_all_files(drive_service)
-
     file_details = []
 
-    for file_metadata in all_files:
-        file_id = file_metadata.get('id')
-        file_name = file_metadata.get('name')
-        mime_type = file_metadata.get('mimeType')
+    # Iterate through files in the directory
+    for root, dirs, files in os.walk(FILES_DIRECTORY):
+        for file_name in files:
+            file_path = os.path.join(root, file_name)
+            mime_type = 'application/pdf' if file_name.endswith('.pdf') else 'text/plain' if file_name.endswith('.txt') else None
+            if mime_type:
+                file_details.append({
+                    "file_name": file_name,
+                    "file_path": file_path,
+                    "mime_type": mime_type
+                })
+                
+                try:
+                    if mime_type == 'application/pdf':
+                        file_text = extract_text_from_pdf(file_path)
+                    elif mime_type == 'text/plain':
+                        file_text = extract_text_from_text_file(file_path)
+                    else:
+                        continue
 
-        file_details.append({
-            "file_id": file_id,
-            "file_name": file_name,
-            "mime_type": mime_type
-        })
-
-        try:
-            if mime_type == 'application/pdf':
-                file_text = extract_text_from_pdf(file_id, drive_service)
-            elif mime_type == 'text/plain':
-                file_text = extract_text_from_text_file(file_id, drive_service)
-            else:
-                continue
-
-            pdf_texts[file_id] = file_text
-        except Exception as e:
-            print(f"Error processing file {file_id}: {e}")
+                    pdf_texts[file_path] = file_text
+                except Exception as e:
+                    print(f"Error processing file {file_name}: {e}")
 
     return file_details
+
+# Extract text from PDF file
+def extract_text_from_pdf(file_path):
+    with open(file_path, 'rb') as f:
+        pdf_reader = PyPDF2.PdfReader(f)
+        text = ""
+        for page_num in range(len(pdf_reader.pages)):
+            page = pdf_reader.pages[page_num]
+            text += page.extract_text() or ""
+    return text
+
+# Extract text from text file
+def extract_text_from_text_file(file_path):
+    with open(file_path, 'r') as f:
+        text = f.read()
+    return text
 
 # Rank documents based on relevance to user query
 def rank_documents(query):
